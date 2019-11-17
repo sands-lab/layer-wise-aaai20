@@ -81,9 +81,17 @@ def get_parser():
     parser.add_argument('--ddp', action='store_true')
     parser.add_argument('--seed', type=int, default=2147483647)
 
+    parser.add_argument('--compress', '-c', type=str, default='none')
+    parser.add_argument('--method', type=str, default='none')
+    parser.add_argument('--ratio', '-K', type=float, default=0.5)
+    parser.add_argument('--threshold', '-V', type=float, default=0.001)
+    parser.add_argument('--qstates', '-Q', type=int, default=255)
+    parser.add_argument('--momentum', type=float, default=0.0)
+
     return parser
 
 
+world_size = dist_utils.env_world_size
 cudnn.benchmark = True
 args = get_parser().parse_args()
 assert not (args.ddp and args.sparsification), 'ddp and sparsification can\'t coexist'
@@ -177,8 +185,10 @@ def main():
 
     # define loss function (criterion) and optimizer
     criterion = torch.nn.CrossEntropyLoss().cuda()
-    optimizer = torch.optim.SGD(optim_params, 0, momentum=args.momentum,
-                                weight_decay=args.weight_decay)  # start with 0 lr. Scheduler will change this later
+    if args.momentum > 0.0:
+        optimizer = torch.optim.SGD(optim_params, 0, momentum=args.momentum, weight_decay=args.weight_decay, nesterov=True)  # start with 0 lr. Scheduler will change this later
+    else:
+        optimizer = torch.optim.SGD(optim_params, 0, weight_decay=args.weight_decay)  # start with 0 lr. Scheduler will change this later
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location=lambda storage, loc: storage.cuda(args.local_rank))
@@ -242,6 +252,138 @@ def main():
             if phase:  save_checkpoint(epoch, model, best_top5, optimizer,
                                        filename=f'sz{phase["bs"]}_checkpoint.path.tar')
 
+def layerwise_compressed_comm(model, world_size, method=None, K=None, V=None, qstates=None):
+    for index, layer in enumerate(model.parameters()):
+        flatten_grad = layer.grad.data.view(-1)
+        if method == 'Topk' and K:
+            #Top K
+            flatten_grad_abs = flatten_grad.abs()
+            thres, _ = flatten_grad_abs.kthvalue(ceil(flatten_grad.numel() * (1 - K))) # send >= thres
+            compress_grad = flatten_grad.clone()
+            compress_grad[flatten_grad_abs < thres] = 0
+        elif method == 'Randomk' and K:
+            #Random K
+            mask = torch.randperm(flatten_grad.numel(), device=layer.device).lt(flatten_grad.numel() * K)
+            compress_grad = flatten_grad.clone()
+            compress_grad *= mask.float()
+        elif method == 'Thresholdv' and V:
+            # Threshold V
+            flatten_grad_abs = flatten_grad.abs()
+            compress_grad = flatten_grad.clone()
+            compress_grad[flatten_grad_abs < V] = 0
+        elif method == 'AdaptiveThreshold':
+            # Adaptive Threshold 
+            H = flatten_grad * 2
+            G_max = flatten_grad.abs().max()
+            compress_grad = flatten_grad.clone()
+            compress_grad[H < G_max ] = 0
+        elif method == 'TernGrad':
+            # TernGrad: Ternarized Gradient
+            flatten_grad_abs = flatten_grad.abs()
+            maxval = flatten_grad_abs.max()
+            prob = flatten_grad_abs.div_(maxval) # [0, 1]
+            binaryrand = torch.rand(flatten_grad.shape, dtype=layer.dtype, device=layer.device).lt_(prob).float()
+            compress_grad = torch.mul(flatten_grad.sign() * maxval, binaryrand)
+        elif method == 'RandomDithering' and qstates:
+            #Random Dithering - where QSGD is default which sets qstates=255
+            norm = torch.norm(flatten_grad) # 2-norm
+            floor= torch.floor(flatten_grad.abs().div(norm)*qstates
+                            + torch.zeros(flatten_grad.shape, dtype=flatten_grad.dtype, device=flatten_grad.device).uniform_(0, 1))
+            compress_grad = torch.mul(flatten_grad.sign() * norm, floor/qstates)
+            compress_grad = torch.where(torch.isinf(compress_grad), torch.zeros_like(compress_grad), compress_grad)
+        else:
+            compress_grad = flatten_grad.clone()
+
+        #Perform All reduce
+        dist.all_reduce(compress_grad)
+
+        # average
+        if compress_grad.numel() > 0:
+            compress_grad /= float(world_size)
+            flatten_grad.copy_(compress_grad)
+        else:
+            flatten_grad.zero_()
+
+def entiremodel_compressed_comm(model, world_size, method=None, K=None, V=None, qstates=None):
+    #concat model grads into one flattened vector
+    vec = []
+    for param in model.parameters:
+        # Ensure the parameters are located in the same device
+        param_device = _check_param_device(param, param_device)
+
+        vec.append(param.grad.data.view(-1))
+    flatten_grad = torch.cat(vec)
+
+    if method == 'Topk' and K:
+        #Top K
+        flatten_grad_abs = flatten_grad.abs()
+        vals, _ = flatten_grad_abs.kthvalue(ceil(flatten_grad.numel() * (1 - K)))
+        compress_grad = flatten_grad.clone()
+        compress_grad[flatten_grad_abs < vals] = 0
+    elif method == 'Randomk' and K:
+        #Random K
+        mask = torch.randperm(flatten_grad.numel(), device=layer.device).lt(flatten_grad.numel() * K)
+        compress_grad = flatten_grad.clone()
+        compress_grad *= mask.float()
+    elif method == 'Thresholdv' and V:
+        # Threshold V
+        flatten_grad_abs = flatten_grad.abs()
+        compress_grad = flatten_grad.clone()
+        compress_grad[flatten_grad_abs < V] = 0
+    elif method == 'AdaptiveThreshold':
+        # Adaptive Threshold 
+        H = flatten_grad * 2
+        G_max = flatten_grad.abs().max()
+        compress_grad = flatten_grad.clone()
+        compress_grad[H < G_max ] = 0
+    elif method == 'TernGrad':
+        # TernGrad: Ternarized Gradient
+        flatten_grad_abs = flatten_grad.abs()
+        maxval = flatten_grad_abs.max()
+        prob = flatten_grad_abs.div_(maxval) # [0, 1]
+        binaryrand = torch.rand(flatten_grad.shape, dtype=layer.dtype, device=layer.device).lt_(prob).float()
+        compress_grad = torch.mul(flatten_grad.sign() * maxval, binaryrand)
+    elif method == 'RandomDithering' and qstates:
+        #Random Dithering - where QSGD is default which sets qstates=255
+        norm = torch.norm(flatten_grad) # 2-norm
+        floor= torch.floor(flatten_grad.abs().div(norm)*qstates
+                        + torch.zeros(flatten_grad.shape, dtype=flatten_grad.dtype, device=flatten_grad.device).uniform_(0, 1))
+        compress_grad = torch.mul(flatten_grad.sign() * norm, floor/qstates)
+        compress_grad = torch.where(torch.isinf(compress_grad), torch.zeros_like(compress_grad), compress_grad)
+    else:
+        compress_grad = flatten_grad.clone()
+
+    #Perform All reduce (sum)
+    dist.all_reduce(compress_grad)
+
+    # average gradients 
+    if compress_grad.numel() > 0:
+        compress_grad /= float(world_size)
+        flatten_grad.copy_(compress_grad)
+    else:
+        flatten_grad.zero_()
+
+    # Restore the gradient data into each indiviual layer of the model
+    # Flag for the device where the parameter is located
+    param_device = None
+    # Pointer for slicing the vector for each parameter
+    pointer = 0
+    for param in model.parameters:
+        # Ensure the parameters are located in the same device
+        param_device = _check_param_device(param, param_device)
+        # The length of the parameter
+        num_param = param.numel()
+        # Slice the vector, reshape it, and replace the old data of the parameter
+        param.grad.data = flatten_grad[pointer:pointer + num_param].view_as(param).data
+        # Increment the pointer
+        pointer += num_param
+
+def all_reduce(model, world_size):
+    with torch.no_grad():
+        for index, layer in enumerate(model.parameters()):
+            dist.all_reduce(layer.grad.data)
+            layer.grad.data /= world_size
+            
 def train(trn_loader, model, criterion, optimizer, scheduler, epoch):
     net_meter = NetworkMeter()
     timer = TimeMeter()
@@ -268,6 +410,15 @@ def train(trn_loader, model, criterion, optimizer, scheduler, epoch):
             loss = loss * args.loss_scale
             model.zero_grad()
             loss.backward()
+
+            #average model gradients
+            if args.compress == 'layerwise':
+                layerwise_compressed_comm(model, dist_utils.env_world_size(), args.method, args.ratio, args.threshold, args.qstates)
+            elif args.compress == 'enitremodel':
+                layerwise_compressed_comm(model, dist_utils.env_world_size(), args.method, args.ratio, args.threshold, args.qstates)
+            else
+                all_reduce(model, dist_utils.env_world_size())
+
             model_grads_to_master_grads(model_params, master_params)
             for param in master_params:  param.grad.data = param.grad.data / args.loss_scale
             optimizer.step()
@@ -276,6 +427,15 @@ def train(trn_loader, model, criterion, optimizer, scheduler, epoch):
         else:
             optimizer.zero_grad()
             loss.backward()
+
+            #average model gradients
+            if args.compress == 'layerwise':
+                layerwise_compressed_comm(model)
+            elif args.compress == 'enitremodel':
+                layerwise_compressed_comm(model)
+            else
+                all_reduce(model)
+
             optimizer.step()
 
         # Train batch done. Logging results
