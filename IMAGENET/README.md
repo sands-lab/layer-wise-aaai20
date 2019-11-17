@@ -8,22 +8,25 @@ Details of the compressed communication can be found in `train_imagenet_nv.py`. 
 
 # Supported Methods
 
-. Randomk - K ratio parameter (percent of selected elements)
-. TopK - K ratio parameter (percent of selected elements)
-. Thresholdv -  V threshold parameter (the value used to pick the elements)
-. TernGrad - no parameter
-. QSGD -  qstates parameter (number of states of QSGD)
+* Randomk - K ratio parameter (percent of selected elements)
+* TopK - K ratio parameter (percent of selected elements)
+* Thresholdv -  V threshold parameter (the value used to pick the elements)
+* TernGrad - no parameter
+* QSGD -  qstates parameter (number of states of QSGD)
 
 # Compression related script parameters
-'''
+```
 parser.add_argument('compress', '-c', type=str, default='none')
 parser.add_argument('--method', type=str, default='none')
 parser.add_argument('--ratio', '-K', type=float, default=0.5)
 parser.add_argument('--threshold', '-V', type=float, default=0.001)
 parser.add_argument('--qstates', '-Q', type=int, default=255)
 parser.add_argument('--momentum', type=float, default=0.0)
-'''
+```
 
-# Running the experiment - an Example
+# Running the experiment - an Example 
+Run the following line on the nodes participating in the training, change the rank (rank of each node) and world_size  (# of nodes) parameters accordingly.
 
-python -m torch.distributed.launch --nproc_per_node=NUM_GPUS_PER_NODE --nnodes=NUM_NODES --node_rank=RANK --master_addr=MASTER_ADDR --master_port=MASTER_PORT training/train_imagenet_nv.py --logdir LOG_DIR --distributed --init-bn0 --no-bn-wd --name RUN_NAME --compress='layerwise' --method='Topk' --ratio=0.3
+```
+python dawn.py --master_address='tcp://192.168.0.1:2222' --rank=0 --world_size=1 --network='resnet9' --compress='layerwise' --method='Topk' --ratio=0.3
+```
