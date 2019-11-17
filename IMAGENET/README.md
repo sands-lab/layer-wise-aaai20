@@ -1,0 +1,1 @@
+python -m torch.distributed.launch --nproc_per_node=NUM_GPUS_PER_NODE --nnodes=NUM_NODES --node_rank=RANK --master_addr=MASTER_ADDR --master_port=MASTER_PORT training/train_imagenet_nv.py --logdir LOG_DIR --distributed --init-bn0 --no-bn-wd --name RUN_NAME --sparsification --randk RANDK --fp16 DATA_PATH
