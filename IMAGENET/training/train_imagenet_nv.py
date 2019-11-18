@@ -276,7 +276,7 @@ def layerwise_compressed_comm(model, world_size, method=None, K=None, V=None, qs
             H = flatten_grad * 2
             G_max = flatten_grad.abs().max()
             compress_grad = flatten_grad.clone()
-            compress_grad[H < G_max ] = 0
+            compress_grad[H.abs() < G_max ] = 0
         elif method == 'TernGrad':
             # TernGrad: Ternarized Gradient
             flatten_grad_abs = flatten_grad.abs()
@@ -335,7 +335,7 @@ def entiremodel_compressed_comm(model, world_size, method=None, K=None, V=None, 
         H = flatten_grad * 2
         G_max = flatten_grad.abs().max()
         compress_grad = flatten_grad.clone()
-        compress_grad[H < G_max ] = 0
+        compress_grad[H.abs() < G_max ] = 0
     elif method == 'TernGrad':
         # TernGrad: Ternarized Gradient
         flatten_grad_abs = flatten_grad.abs()
