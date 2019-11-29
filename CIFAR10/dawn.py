@@ -2,6 +2,8 @@ from core import *
 from torch_backend import *
 import argparse
 import os.path
+from vgg16 import *
+from alexnet import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', type=str, default='./data')
@@ -16,7 +18,7 @@ parser.add_argument('--ratio', '-K', type=float, default=0.5)
 parser.add_argument('--threshold', '-V', type=float, default=0.001)
 parser.add_argument('--qstates', '-Q', type=int, default=255)
 parser.add_argument('--momentum', type=float, default=0.0)
-     
+
 #Network definition
 def conv_bn(c_in, c_out, bn_weight_init=1.0, **kw):
     return {
@@ -61,7 +63,7 @@ def basic_alexnet(channels, weight,  pool, **kw):
         'layer4': dict(conv_bn(channels['layer3'], channels['layer4'], **kw), pool=pool),
         'pool': nn.MaxPool2d(2),
         'flatten': Flatten(),
-        'linear': nn.Linear(channels['layer3'], 10, bias=False),
+        'linear': nn.Linear(channels['layer4'], 10, bias=False),
         'classifier': Mul(weight),
     }
 
@@ -92,11 +94,11 @@ class TSVLogger():
         self.log.append(f'{epoch}\t{hours:.8f}\t{acc:.2f}')
     def __str__(self):
         return '\n'.join(self.log)
-   
+
 def main():
 
     args = parser.parse_args()
-    
+
     print('Downloading datasets')
     dataset = cifar10(args.data_dir)
 
@@ -113,37 +115,41 @@ def main():
     if args.network == 'Resent9':
         model = Network(union(resnet9(), losses)).to(device)
     elif args.network == 'Alexnet':
-        model = Network(union(alexnet(), losses)).to(device)   
+        model = Network(union(alexnet(), losses)).to(device)
+    elif args.network == 'Alexnet1':
+        model = AlexNet().to(device)
+    elif args.network == 'vgg16':
+        model =vgg16model.to(device)
 
     print('Warming up cudnn on random inputs')
     for size in [batch_size, len(dataset['test']['labels']) % batch_size]:
         warmup_cudnn(model, size)
-    
+
     print('Starting timer')
     timer = Timer(synch=torch.cuda.synchronize)
-    
+
     print('Preprocessing training data')
     train_set = list(zip(transpose(normalise(pad(dataset['train']['data'], 4))), dataset['train']['labels']))
     print(f'Finished in {timer():.2} seconds')
     print('Preprocessing test data')
     test_set = list(zip(transpose(normalise(dataset['test']['data'])), dataset['test']['labels']))
     print(f'Finished in {timer():.2} seconds')
-    
+
     TSV = TSVLogger()
-    
+
     train_batches = Batches(Transform(train_set, train_transforms), batch_size, shuffle=True, set_random_choices=True, drop_last=True)
     test_batches = Batches(test_set, batch_size, shuffle=False, drop_last=False)
     lr = lambda step: lr_schedule(step/len(train_batches))/batch_size
-    
+
     #use Nestrov's momentum SGD or vanillia SGD
     if args.momentum > 0:
-        opt = SGD(trainable_params(model), lr=lr, momentum=args.momentum, weight_decay=5e-4*batch_size, nesterov=True)   
+        opt = SGD(trainable_params(model), lr=lr, momentum=args.momentum, weight_decay=5e-4*batch_size, nesterov=True)
     else:
         opt = SGD(trainable_params(model), lr=lr, weight_decay=5e-4*batch_size)
 
     train(model, opt, train_batches, test_batches, epochs, args.master_address, args.world_size, args.rank, loggers=(TableLogger(), TSV), timer=timer, test_time_in_total=False, args.compress, args.method, args.ratio, args.threshold, args.qstates)
-    
+
     with open(os.path.join(os.path.expanduser(args.log_dir), 'logs.tsv'), 'w') as f:
-        f.write(str(TSV))        
-        
+        f.write(str(TSV))
+
 main()
