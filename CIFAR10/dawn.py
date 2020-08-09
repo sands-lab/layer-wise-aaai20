@@ -1,9 +1,9 @@
-from core import *
-from torch_backend import *
+from CIFAR10.core import *
+from CIFAR10.torch_backend import *
 import argparse
 import os.path
-from vgg16 import *
-from alexnet import *
+from CIFAR10.vgg16 import *
+from CIFAR10.alexnet import *
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--data_dir', type=str, default='./data')
@@ -147,7 +147,7 @@ def main():
     else:
         opt = SGD(trainable_params(model), lr=lr, weight_decay=5e-4*batch_size)
 
-    train(model, opt, train_batches, test_batches, epochs, args.master_address, args.world_size, args.rank, loggers=(TableLogger(), TSV), timer=timer, test_time_in_total=False, args.compress, args.method, args.ratio, args.threshold, args.qstates)
+    train(model, opt, train_batches, test_batches, epochs, args.master_address, args.world_size, args.rank, loggers=(TableLogger(), TSV), timer=timer, test_time_in_total=False, compress=args.compress, method=args.method, K=args.ratio, V=args.threshold, qstates=args.qstates)
 
     with open(os.path.join(os.path.expanduser(args.log_dir), 'logs.tsv'), 'w') as f:
         f.write(str(TSV))

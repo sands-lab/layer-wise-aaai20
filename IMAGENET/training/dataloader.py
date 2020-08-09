@@ -14,14 +14,14 @@ from torch.utils.data.sampler import Sampler
 import torchvision
 import pickle
 from tqdm import tqdm
-from dist_utils import env_world_size, env_rank
+from IMAGENET.training.dist_utils import env_world_size, env_rank
 
 
 # util is one level up, so import that
 module_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(f'{module_path}/..'))
 
-import util
+import IMAGENET.training.util as util
 
 def get_loaders(traindir, valdir, sz, bs, fp16=True, val_bs=None, workers=8, rect_val=False, min_scale=0.08, distributed=False):
     val_bs = val_bs or bs

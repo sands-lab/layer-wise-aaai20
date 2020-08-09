@@ -10,7 +10,7 @@ import ncluster
 from ncluster import aws_util as u
 
 # todo(y): change to AMI owned by me ie, pytorch.imagenet.source.v7-copy
-import util
+import IMAGENET.training.util as util
 
 # IMAGE_NAME = 'pytorch.imagenet.source.v7'
 HOSTS_SLOTS_FN = 'hosts.slots'

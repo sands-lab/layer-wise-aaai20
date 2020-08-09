@@ -15,24 +15,24 @@ import torch.optim
 import torch.utils.data
 import torch.utils.data.distributed
 
-import dataloader
-import dist_utils
-import experimental_utils
-import resnet
+import IMAGENET.training.dataloader as dataloader
+import IMAGENET.training.dist_utils as dist_utils
+import IMAGENET.training.experimental_utils as experimental_utils
+import IMAGENET.training.resnet as resnet
 
-from sparsified_ddp import RandomKSparsifiedDDP
-from ddp import DistributedDataParallel
+from IMAGENET.training.sparsified_ddp import RandomKSparsifiedDDP
+from IMAGENET.training.ddp import DistributedDataParallel
 from pprint import pprint as pp
 
 # util is one level up, so import that
 module_path = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.abspath(f'{module_path}/..'))
 
-import util
-from fp16util import *
-from logger import TensorboardLogger, FileLogger
-from meter import AverageMeter, NetworkMeter, TimeMeter
-
+import IMAGENET.training.util as util
+from IMAGENET.training.fp16util import *
+from IMAGENET.training.logger import TensorboardLogger, FileLogger
+from IMAGENET.training.meter import AverageMeter, NetworkMeter, TimeMeter
+import math
 import wandb
 
 
@@ -258,7 +258,7 @@ def layerwise_compressed_comm(model, world_size, method=None, K=None, V=None, qs
         if method == 'Topk' and K:
             #Top K
             flatten_grad_abs = flatten_grad.abs()
-            thres, _ = flatten_grad_abs.kthvalue(ceil(flatten_grad.numel() * (1 - K))) # send >= thres
+            thres, _ = flatten_grad_abs.kthvalue(math.ceil(flatten_grad.numel() * (1 - K))) # send >= thres
             compress_grad = flatten_grad.clone()
             compress_grad[flatten_grad_abs < thres] = 0
         elif method == 'Randomk' and K:
@@ -309,7 +309,7 @@ def entiremodel_compressed_comm(model, world_size, method=None, K=None, V=None, 
     vec = []
     for param in model.parameters:
         # Ensure the parameters are located in the same device
-        param_device = _check_param_device(param, param_device)
+        #param_device = _check_param_device(param, param_device)
 
         vec.append(param.grad.data.view(-1))
     flatten_grad = torch.cat(vec)
@@ -317,12 +317,12 @@ def entiremodel_compressed_comm(model, world_size, method=None, K=None, V=None, 
     if method == 'Topk' and K:
         #Top K
         flatten_grad_abs = flatten_grad.abs()
-        vals, _ = flatten_grad_abs.kthvalue(ceil(flatten_grad.numel() * (1 - K)))
+        vals, _ = flatten_grad_abs.kthvalue(math.ceil(flatten_grad.numel() * (1 - K)))
         compress_grad = flatten_grad.clone()
         compress_grad[flatten_grad_abs < vals] = 0
     elif method == 'Randomk' and K:
         #Random K
-        mask = torch.randperm(flatten_grad.numel(), device=layer.device).lt(flatten_grad.numel() * K)
+        mask = torch.randperm(flatten_grad.numel(), device=flatten_grad.device).lt(flatten_grad.numel() * K)
         compress_grad = flatten_grad.clone()
         compress_grad *= mask.float()
     elif method == 'Thresholdv' and V:
@@ -341,7 +341,7 @@ def entiremodel_compressed_comm(model, world_size, method=None, K=None, V=None, 
         flatten_grad_abs = flatten_grad.abs()
         maxval = flatten_grad_abs.max()
         prob = flatten_grad_abs.div_(maxval) # [0, 1]
-        binaryrand = torch.rand(flatten_grad.shape, dtype=layer.dtype, device=layer.device).lt_(prob).float()
+        binaryrand = torch.rand(flatten_grad.shape, dtype=flatten_grad.dtype, device=flatten_grad.device).lt_(prob).float()
         compress_grad = torch.mul(flatten_grad.sign() * maxval, binaryrand)
     elif method == 'RandomDithering' and qstates:
         #Random Dithering - where QSGD is default which sets qstates=255
@@ -370,7 +370,8 @@ def entiremodel_compressed_comm(model, world_size, method=None, K=None, V=None, 
     pointer = 0
     for param in model.parameters:
         # Ensure the parameters are located in the same device
-        param_device = _check_param_device(param, param_device)
+        #param_device = _check_param_device(param, param_device)
+
         # The length of the parameter
         num_param = param.numel()
         # Slice the vector, reshape it, and replace the old data of the parameter
@@ -385,6 +386,7 @@ def all_reduce(model, world_size):
             layer.grad.data /= world_size
             
 def train(trn_loader, model, criterion, optimizer, scheduler, epoch):
+    global world_size
     net_meter = NetworkMeter()
     timer = TimeMeter()
     losses = AverageMeter()
@@ -413,11 +415,11 @@ def train(trn_loader, model, criterion, optimizer, scheduler, epoch):
 
             #average model gradients
             if args.compress == 'layerwise':
-                layerwise_compressed_comm(model, dist_utils.env_world_size(), args.method, args.ratio, args.threshold, args.qstates)
+                layerwise_compressed_comm(model, world_size, args.method, args.ratio, args.threshold, args.qstates)
             elif args.compress == 'enitremodel':
-                layerwise_compressed_comm(model, dist_utils.env_world_size(), args.method, args.ratio, args.threshold, args.qstates)
-            else
-                all_reduce(model, dist_utils.env_world_size())
+                layerwise_compressed_comm(model, world_size, args.method, args.ratio, args.threshold, args.qstates)
+            else:
+                all_reduce(model, world_size)
 
             model_grads_to_master_grads(model_params, master_params)
             for param in master_params:  param.grad.data = param.grad.data / args.loss_scale
@@ -430,11 +432,11 @@ def train(trn_loader, model, criterion, optimizer, scheduler, epoch):
 
             #average model gradients
             if args.compress == 'layerwise':
-                layerwise_compressed_comm(model)
+                layerwise_compressed_comm(model, world_size, args.method, args.ratio, args.threshold, args.qstates)
             elif args.compress == 'enitremodel':
-                layerwise_compressed_comm(model)
-            else
-                all_reduce(model)
+                layerwise_compressed_comm(model, world_size, args.method, args.ratio, args.threshold, args.qstates)
+            else:
+                all_reduce(model, world_size)
 
             optimizer.step()
 

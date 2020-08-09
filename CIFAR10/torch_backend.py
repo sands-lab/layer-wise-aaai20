@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from torch import nn
 import torchvision
-from core import build_graph, cat, to_numpy
+from CIFAR10.core import build_graph, cat, to_numpy
 
 torch.backends.cudnn.benchmark = True
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")

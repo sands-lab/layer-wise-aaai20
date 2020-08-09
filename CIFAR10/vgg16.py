@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from torch_backend import *
+from CIFAR10.torch_backend import *
 
 # losses = {
 #     'loss':  (nn.CrossEntropyLoss(reduction='none'), [('classifier',), ('target',)]),

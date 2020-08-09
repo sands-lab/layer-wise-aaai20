@@ -4,6 +4,8 @@ import time
 import numpy as np
 from functools import singledispatch
 import torch.distributed as dist
+import torch
+import math
 
 #####################
 # utils
@@ -176,7 +178,7 @@ def layerwise_compressed_comm(model, world_size, method=None, K=None, V=None, qs
         if method == 'Topk' and K:
             #Top K
             flatten_grad_abs = flatten_grad.abs()
-            thres, _ = flatten_grad_abs.kthvalue(ceil(flatten_grad.numel() * (1 - K))) # send >= thres
+            thres, _ = flatten_grad_abs.kthvalue(math.ceil(flatten_grad.numel() * (1 - K))) # send >= thres
             compress_grad = flatten_grad.clone()
             compress_grad[flatten_grad_abs < thres] = 0
         elif method == 'Randomk' and K:
@@ -227,20 +229,21 @@ def entiremodel_compressed_comm(model, world_size, method=None, K=None, V=None, 
     vec = []
     for param in model.parameters:
         # Ensure the parameters are located in the same device
-        param_device = _check_param_device(param, param_device)
+        #param_device = _check_param_device(param, param_device)
 
         vec.append(param.grad.data.view(-1))
+
     flatten_grad = torch.cat(vec)
 
     if method == 'Topk' and K:
         #Top K
         flatten_grad_abs = flatten_grad.abs()
-        vals, _ = flatten_grad_abs.kthvalue(ceil(flatten_grad.numel() * (1 - K)))
+        vals, _ = flatten_grad_abs.kthvalue(math.ceil(flatten_grad.numel() * (1 - K)))
         compress_grad = flatten_grad.clone()
         compress_grad[flatten_grad_abs < vals] = 0
     elif method == 'Randomk' and K:
         #Random K
-        mask = torch.randperm(flatten_grad.numel(), device=layer.device).lt(flatten_grad.numel() * K)
+        mask = torch.randperm(flatten_grad.numel(), device=flatten_grad.device).lt(flatten_grad.numel() * K)
         compress_grad = flatten_grad.clone()
         compress_grad *= mask.float()
     elif method == 'Thresholdv' and V:
@@ -258,8 +261,8 @@ def entiremodel_compressed_comm(model, world_size, method=None, K=None, V=None, 
         # TernGrad: Ternarized Gradient
         flatten_grad_abs = flatten_grad.abs()
         maxval = flatten_grad_abs.max()
-        prob = flatten_grad_abs.div_(maxval) # [0, 1]
-        binaryrand = torch.rand(flatten_grad.shape, dtype=layer.dtype, device=layer.device).lt_(prob).float()
+        prob = flatten_grad_abs.div(maxval) # [0, 1]
+        binaryrand = torch.rand(flatten_grad.shape, dtype=flatten_grad, device=flatten_grad).lt_(prob).float()
         compress_grad = torch.mul(flatten_grad.sign() * maxval, binaryrand)
     elif method == 'RandomDithering' and qstates:
         #Random Dithering - where QSGD is default which sets qstates=255
@@ -288,7 +291,8 @@ def entiremodel_compressed_comm(model, world_size, method=None, K=None, V=None, 
     pointer = 0
     for param in model.parameters:
         # Ensure the parameters are located in the same device
-        param_device = _check_param_device(param, param_device)
+        #param_device = _check_param_device(param, param_device)
+
         # The length of the parameter
         num_param = param.numel()
         # Slice the vector, reshape it, and replace the old data of the parameter
@@ -317,8 +321,8 @@ def run_batches(model, batches, training, world_size, optimizer_step=None, stats
             model.zero_grad() 
     return stats
     
-def train_epoch(model, train_batches, test_batches, optimizer_step, timer, world_size, test_time_in_total=True, compress=None, method=None, K=None, V=None, qstates=None)):
-    train_stats, train_time = run_batches(model, train_batches, True, world_size, optimizer_step, compress, method, K, V, qstates), timer()
+def train_epoch(model, train_batches, test_batches, optimizer_step, timer, world_size, test_time_in_total=True, compress=None, method=None, K=None, V=None, qstates=None):
+    train_stats, train_time = run_batches(model, train_batches, True, world_size, optimizer_step, compress=compress, method=method, K=K, V=V, qstates=qstates), timer()
     test_stats, test_time = run_batches(model, test_batches, False, world_size), timer(test_time_in_total)
     return { 
         'train time': train_time, 'train loss': train_stats.mean('loss'), 'train acc': train_stats.mean('correct'), 
@@ -326,12 +330,11 @@ def train_epoch(model, train_batches, test_batches, optimizer_step, timer, world
         'total time': timer.total_time, 
     }
 
-def train(model, optimizer, train_batches, test_batches, epochs, master_address, world_size, rank, 
-          loggers=(), test_time_in_total=True, timer=None, compress=None, method=None, K=None, V=None, qstates=None)):  
+def train(model, optimizer, train_batches, test_batches, epochs, master_address, world_size, rank, loggers=(), test_time_in_total=True, timer=None, compress=None, method=None, K=None, V=None, qstates=None):
     dist.init_process_group(backend='gloo', init_method=master_address, world_size=world_size, rank=rank)
     timer = timer or Timer()
     for epoch in range(epochs):
-        epoch_stats = train_epoch(model, train_batches, test_batches, optimizer.step, timer, world_size, test_time_in_total=test_time_in_total, compress, method, K, V, qstates) 
+        epoch_stats = train_epoch(model, train_batches, test_batches, optimizer.step, timer, world_size, test_time_in_total=test_time_in_total, compress=compress, method=method, K=K, V=V, qstates=qstates)
         summary = union({'epoch': epoch+1, 'lr': optimizer.param_values()['lr']*train_batches.batch_size}, epoch_stats)
         for logger in loggers:
             logger.append(summary)    

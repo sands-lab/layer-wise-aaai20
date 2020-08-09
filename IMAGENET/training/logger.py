@@ -115,7 +115,7 @@ class FileLogger:
     self.logger.debug(*new_args)
 
   def event(self, *args):
-    self.logger.warn(*args)
+    self.logger.warning(*args)
 
   def verbose(self, *args):
     self.logger.info(*args)
